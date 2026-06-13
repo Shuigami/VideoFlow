@@ -1,0 +1,1 @@
+{"root":["./src/App.tsx","./src/api.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/JobCard.tsx","./src/components/StatusBadge.tsx","./src/components/UploadZone.tsx","./src/hooks/useJobWebSocket.ts"],"version":"5.6.3"}

@@ -1,0 +1,14 @@
+[project]
+name = "videoflow-local-server"
+version = "0.1.0"
+description = "Serveur local VideoFlow (simule Lambda + EventBridge + WebSocket)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "python-multipart>=0.0.12",
+    "boto3>=1.34.0",
+]
+
+[project.scripts]
+videoflow-server = "uvicorn:main"

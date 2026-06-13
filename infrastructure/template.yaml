@@ -1,0 +1,395 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: VideoFlow — Plateforme serverless de traitement vidéo (Partie 1 + 2)
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 256
+    Layers:
+      - !Ref SharedLayer
+    Environment:
+      Variables:
+        JOBS_TABLE: !Ref JobsTable
+        UPLOAD_BUCKET: !Ref UploadBucket
+        PROCESSED_BUCKET: !Ref ProcessedBucket
+        EVENT_BUS_NAME: !Ref VideoEventBus
+        CONNECTIONS_TABLE: !Ref ConnectionsTable
+        NOTIFICATIONS_TOPIC_ARN: !Ref NotificationsTopic
+        WEBSOCKET_ENDPOINT: !Sub https://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+  # ── Layer partagée (utils + FFmpeg) ───────────────────────────────────────
+  SharedLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: !Sub videoflow-shared-${Environment}
+      Description: Code partagé VideoFlow et binaires FFmpeg
+      ContentUri: ../backend/layer/
+      CompatibleRuntimes:
+        - python3.12
+
+  # ── Stockage ──────────────────────────────────────────────────────────────
+  UploadBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub videoflow-uploads-${Environment}-${AWS::AccountId}
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, PUT, POST, HEAD]
+            AllowedOrigins: ['*']
+            MaxAge: 3600
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  ProcessedBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub videoflow-processed-${Environment}-${AWS::AccountId}
+      CorsConfiguration:
+        CorsRules:
+          - AllowedHeaders: ['*']
+            AllowedMethods: [GET, HEAD]
+            AllowedOrigins: ['*']
+            MaxAge: 3600
+
+  # ── Base de données ───────────────────────────────────────────────────────
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub videoflow-jobs-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: jobId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: jobId
+          KeyType: HASH
+
+  ConnectionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub videoflow-connections-${Environment}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: connectionId
+          AttributeType: S
+        - AttributeName: jobId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: connectionId
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: JobIdIndex
+          KeySchema:
+            - AttributeName: jobId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  # ── Notifications ─────────────────────────────────────────────────────────
+  NotificationsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub videoflow-notifications-${Environment}
+      DisplayName: VideoFlow Notifications
+
+  # ── EventBridge ───────────────────────────────────────────────────────────
+  VideoEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Sub videoflow-events-${Environment}
+
+  ProcessVideoRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub videoflow-process-video-${Environment}
+      EventBusName: !Ref VideoEventBus
+      EventPattern:
+        source:
+          - videoflow.upload
+        detail-type:
+          - Video Uploaded
+      State: ENABLED
+      Targets:
+        - Id: ProcessVideoTarget
+          Arn: !GetAtt ProcessVideoFunction.Arn
+
+  ProcessVideoRulePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ProcessVideoFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt ProcessVideoRule.Arn
+
+  # ── Lambdas Partie 1 ──────────────────────────────────────────────────────
+  CreateJobFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-create-job-${Environment}
+      CodeUri: ../backend/upload-api/create_job/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobsTable
+        - S3WritePolicy:
+            BucketName: !Ref UploadBucket
+      Events:
+        CreateJob:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VideoFlowApi
+            Path: /jobs
+            Method: POST
+
+  ListJobsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-list-jobs-${Environment}
+      CodeUri: ../backend/upload-api/list_jobs/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref JobsTable
+        - S3ReadPolicy:
+            BucketName: !Ref ProcessedBucket
+      Events:
+        ListJobs:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VideoFlowApi
+            Path: /jobs
+            Method: GET
+
+  GetJobFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-get-job-${Environment}
+      CodeUri: ../backend/upload-api/get_job/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBReadPolicy:
+            TableName: !Ref JobsTable
+        - S3ReadPolicy:
+            BucketName: !Ref ProcessedBucket
+      Events:
+        GetJob:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VideoFlowApi
+            Path: /jobs/{jobId}
+            Method: GET
+
+  ConfirmUploadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-confirm-upload-${Environment}
+      CodeUri: ../backend/upload-api/confirm_upload/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobsTable
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref VideoEventBus
+      Events:
+        ConfirmUpload:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VideoFlowApi
+            Path: /jobs/{jobId}/confirm
+            Method: POST
+
+  # ── Lambdas Partie 2 — Pipeline ───────────────────────────────────────────
+  ProcessVideoFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-process-video-${Environment}
+      CodeUri: ../backend/processing/process_video/
+      Handler: handler.lambda_handler
+      Timeout: 900
+      MemorySize: 2048
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobsTable
+        - S3ReadPolicy:
+            BucketName: !Ref UploadBucket
+        - S3ReadPolicy:
+            BucketName: !Ref ProcessedBucket
+        - S3WritePolicy:
+            BucketName: !Ref ProcessedBucket
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt NotificationsTopic.TopicName
+        - Statement:
+            - Effect: Allow
+              Action:
+                - execute-api:ManageConnections
+              Resource: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/${Environment}/POST/@connections/*
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:DeleteItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConnectionsTable}/index/JobIdIndex
+
+  # ── WebSocket API ─────────────────────────────────────────────────────────
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub videoflow-ws-${Environment}
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      StageName: !Ref Environment
+      AutoDeploy: true
+
+  WebSocketConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsConnectFunction.Arn}/invocations
+
+  WebSocketDisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsDisconnectFunction.Arn}/invocations
+
+  WebSocketSubscribeIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${WsSubscribeFunction.Arn}/invocations
+
+  WebSocketConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      AuthorizationType: NONE
+      Target: !Join ['/', ['integrations', !Ref WebSocketConnectIntegration]]
+
+  WebSocketDisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      AuthorizationType: NONE
+      Target: !Join ['/', ['integrations', !Ref WebSocketDisconnectIntegration]]
+
+  WebSocketSubscribeRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: subscribe
+      AuthorizationType: NONE
+      Target: !Join ['/', ['integrations', !Ref WebSocketSubscribeIntegration]]
+
+  WsConnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-ws-connect-${Environment}
+      CodeUri: ../backend/websocket/connect/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+  WsConnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsConnectFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$connect
+
+  WsDisconnectFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-ws-disconnect-${Environment}
+      CodeUri: ../backend/websocket/disconnect/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+  WsDisconnectPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsDisconnectFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/$disconnect
+
+  WsSubscribeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-ws-subscribe-${Environment}
+      CodeUri: ../backend/websocket/subscribe/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref ConnectionsTable
+
+  WsSubscribePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref WsSubscribeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*/subscribe
+
+  # ── API Gateway REST ──────────────────────────────────────────────────────
+  VideoFlowApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      Name: !Sub videoflow-api-${Environment}
+      StageName: !Ref Environment
+      Cors:
+        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowHeaders: "'Content-Type,Authorization'"
+        AllowOrigin: "'*'"
+
+Outputs:
+  ApiUrl:
+    Description: URL de l'API REST VideoFlow
+    Value: !Sub https://${VideoFlowApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+
+  WebSocketUrl:
+    Description: URL WebSocket pour notifications temps réel
+    Value: !Sub wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}
+
+  UploadBucketName:
+    Description: Bucket S3 pour les uploads bruts
+    Value: !Ref UploadBucket
+
+  ProcessedBucketName:
+    Description: Bucket S3 pour les vidéos traitées
+    Value: !Ref ProcessedBucket
+
+  JobsTableName:
+    Description: Table DynamoDB des jobs
+    Value: !Ref JobsTable
+
+  EventBusName:
+    Description: EventBridge bus
+    Value: !Ref VideoEventBus
+
+  NotificationsTopicArn:
+    Description: SNS topic pour notifications de fin de traitement
+    Value: !Ref NotificationsTopic

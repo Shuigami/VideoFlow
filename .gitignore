@@ -1,0 +1,30 @@
+# Dépendances
+node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.Python
+.venv/
+venv/
+
+# AWS SAM
+infrastructure/.aws-sam/
+infrastructure/packaged.yaml
+
+# Environnement
+.env
+.env.local
+frontend/.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Local server data
+backend/local-server/data/
+
+# Lambda layer (FFmpeg binaires générés au build)
+backend/layer/bin/
+backend/layer/python/
