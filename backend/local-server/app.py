@@ -237,6 +237,32 @@ async def get_job(job_id: str) -> dict[str, Any]:
     return enrich_job(jobs[job_id])
 
 
+@app.delete("/jobs/{job_id}")
+async def delete_job(job_id: str) -> dict[str, str]:
+    if job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if jobs[job_id].get("status") == "PROCESSING":
+        raise HTTPException(
+            status_code=409,
+            detail="Impossible de supprimer un job en cours de traitement",
+        )
+
+    upload_dir = UPLOAD_DIR / job_id
+    processed_dir = PROCESSED_DIR / job_id
+
+    del jobs[job_id]
+    save_jobs()
+    job_subscribers.pop(job_id, None)
+
+    if upload_dir.exists():
+        shutil.rmtree(upload_dir)
+    if processed_dir.exists():
+        shutil.rmtree(processed_dir)
+
+    return {"message": "Job supprimé", "jobId": job_id}
+
+
 @app.get("/media/{job_id}/{filename}")
 async def serve_media(job_id: str, filename: str) -> FileResponse:
     file_path = PROCESSED_DIR / job_id / filename

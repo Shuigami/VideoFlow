@@ -1,12 +1,12 @@
-import { useCallback, useEffect, useState } from "react";
-import { getJob, isMockMode, listJobs, subscribeToMockJob } from "./api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { deleteJob, getJob, isMockMode, listJobs, subscribeToMockJob } from "./api";
 import { JobCard, JobDetail } from "./components/JobCard";
 import { UploadZone } from "./components/UploadZone";
-import { isWebSocketEnabled, useJobWebSocket } from "./hooks/useJobWebSocket";
+import { isWebSocketEnabled, useJobsWebSocket } from "./hooks/useJobWebSocket";
 import type { VideoJob } from "./types";
 import "./App.css";
 
-const ACTIVE_STATUSES = new Set(["UPLOADED", "PROCESSING"]);
+const NON_TERMINAL_STATUSES = new Set(["PENDING", "UPLOADED", "PROCESSING"]);
 
 function dedupeJobs(jobs: VideoJob[]): VideoJob[] {
   const byId = new Map<string, VideoJob>();
@@ -27,8 +27,25 @@ export default function App() {
   const [jobs, setJobs] = useState<VideoJob[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedJob, setSelectedJob] = useState<VideoJob | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const deletedJobIdsRef = useRef(new Set<string>());
+  const refreshGenerationRef = useRef(0);
+
+  const filterDeleted = useCallback(
+    (items: VideoJob[]) => items.filter((job) => !deletedJobIdsRef.current.has(job.jobId)),
+    [],
+  );
+
+  const nonTerminalJobIds = jobs
+    .filter((job) => NON_TERMINAL_STATUSES.has(job.status))
+    .map((job) => job.jobId);
+
+  const hasNonTerminalJobs = nonTerminalJobIds.length > 0;
 
   const applyJobUpdate = useCallback((update: Partial<VideoJob> & { jobId: string }) => {
+    if (deletedJobIdsRef.current.has(update.jobId)) return;
+
     setSelectedJob((current) =>
       current?.jobId === update.jobId ? mergeJob(current, update) : current,
     );
@@ -38,53 +55,61 @@ export default function App() {
       const next = existing
         ? prev.map((item) => (item.jobId === update.jobId ? merged : item))
         : [merged, ...prev];
-      return dedupeJobs(next);
+      return dedupeJobs(filterDeleted(next));
     });
-  }, []);
+  }, [filterDeleted]);
 
-  useJobWebSocket(selectedId, applyJobUpdate);
+  useJobsWebSocket(nonTerminalJobIds, applyJobUpdate);
 
   useEffect(() => {
-    if (!selectedId || !isMockMode) return;
-    return subscribeToMockJob(selectedId, applyJobUpdate);
-  }, [selectedId, applyJobUpdate]);
+    if (!isMockMode) return;
+    const unsubscribers = nonTerminalJobIds.map((jobId) =>
+      subscribeToMockJob(jobId, applyJobUpdate),
+    );
+    return () => {
+      for (const unsubscribe of unsubscribers) unsubscribe();
+    };
+  }, [nonTerminalJobIds.join(","), applyJobUpdate]);
 
   const refreshJobs = useCallback(async () => {
+    const generation = ++refreshGenerationRef.current;
     const data = await listJobs();
-    const enriched = await Promise.all(
-      data.map(async (job) => {
-        if (job.thumbnailUrl || job.status === "PENDING") return job;
-        try {
-          return await getJob(job.jobId);
-        } catch {
-          return job;
-        }
-      }),
-    );
-    const fresh = dedupeJobs(enriched);
+    if (generation !== refreshGenerationRef.current) return;
+
+    const fresh = filterDeleted(dedupeJobs(data));
     setJobs(fresh);
     setSelectedJob((current) => {
-      if (!current) return current;
+      if (!current || deletedJobIdsRef.current.has(current.jobId)) return null;
       const updated = fresh.find((j) => j.jobId === current.jobId);
-      return updated ? mergeJob(current, updated) : current;
+      return updated ?? null;
     });
-  }, []);
+    setSelectedId((current) => {
+      if (!current || deletedJobIdsRef.current.has(current)) return null;
+      return fresh.some((j) => j.jobId === current) ? current : null;
+    });
+  }, [filterDeleted]);
 
   useEffect(() => {
     refreshJobs().catch(console.error);
   }, [refreshJobs]);
 
-  // Polling de secours pour tous les jobs actifs (pas seulement le job sélectionné)
-  const activeJobIds = jobs
-    .filter((job) => ACTIVE_STATUSES.has(job.status))
-    .map((job) => job.jobId)
-    .join(",");
-
+  // Rafraîchissement périodique tant qu'il reste des jobs en cours
   useEffect(() => {
-    if (isMockMode || !activeJobIds) return;
+    if (isMockMode || !hasNonTerminalJobs) return;
+
+    const interval = setInterval(() => {
+      refreshJobs().catch(console.error);
+    }, 4000);
+
+    return () => clearInterval(interval);
+  }, [hasNonTerminalJobs, refreshJobs]);
+
+  // Polling rapide par job (complète le WebSocket)
+  useEffect(() => {
+    if (isMockMode || nonTerminalJobIds.length === 0) return;
 
     const pollAll = () => {
-      for (const jobId of activeJobIds.split(",")) {
+      for (const jobId of nonTerminalJobIds) {
         getJob(jobId)
           .then(applyJobUpdate)
           .catch(() => undefined);
@@ -92,9 +117,21 @@ export default function App() {
     };
 
     pollAll();
-    const interval = setInterval(pollAll, 1500);
+    const interval = setInterval(pollAll, 2000);
     return () => clearInterval(interval);
-  }, [activeJobIds, applyJobUpdate]);
+  }, [nonTerminalJobIds.join(","), applyJobUpdate]);
+
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await refreshJobs();
+    } catch (error) {
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : "Impossible d'actualiser la liste");
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const handleJobStarted = (jobId: string) => {
     setSelectedId(jobId);
@@ -104,15 +141,47 @@ export default function App() {
     applyJobUpdate(job);
     setSelectedId(job.jobId);
     setSelectedJob(job);
+    refreshJobs().catch(console.error);
   };
 
   const handleSelect = async (jobId: string) => {
     setSelectedId(jobId);
     try {
       const job = await getJob(jobId);
+      applyJobUpdate(job);
       setSelectedJob(job);
     } catch {
       setSelectedJob(null);
+    }
+  };
+
+  const handleDelete = async (jobId: string) => {
+    const job = jobs.find((item) => item.jobId === jobId);
+    if (!job || job.status === "PROCESSING") return;
+
+    const confirmed = window.confirm(
+      `Supprimer « ${job.filename} » ?\n\nLes fichiers S3 et l'entrée DynamoDB seront supprimés définitivement.`,
+    );
+    if (!confirmed) return;
+
+    setDeletingId(jobId);
+    deletedJobIdsRef.current.add(jobId);
+    refreshGenerationRef.current += 1;
+    setJobs((prev) => prev.filter((item) => item.jobId !== jobId));
+    if (selectedId === jobId) {
+      setSelectedId(null);
+      setSelectedJob(null);
+    }
+
+    try {
+      await deleteJob(jobId);
+    } catch (error) {
+      deletedJobIdsRef.current.delete(jobId);
+      console.error(error);
+      window.alert(error instanceof Error ? error.message : "Échec de la suppression");
+      await refreshJobs();
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -166,9 +235,10 @@ export default function App() {
             <button
               type="button"
               className="btn-ghost"
-              onClick={() => refreshJobs().catch(console.error)}
+              disabled={refreshing}
+              onClick={() => handleRefresh()}
             >
-              Actualiser
+              {refreshing ? "Actualisation…" : "Actualiser"}
             </button>
           </div>
           <div className="jobs-list">
@@ -189,7 +259,11 @@ export default function App() {
 
         <section className="panel detail-panel">
           <h2>Détail du pipeline</h2>
-          <JobDetail job={selectedJob} />
+          <JobDetail
+            job={selectedJob}
+            deleting={selectedJob?.jobId === deletingId}
+            onDelete={handleDelete}
+          />
         </section>
       </main>
 

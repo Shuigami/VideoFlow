@@ -60,9 +60,11 @@ export function JobCard({ job, selected, onSelect }: JobCardProps) {
 
 interface JobDetailProps {
   job: VideoJob | null;
+  deleting?: boolean;
+  onDelete?: (jobId: string) => void;
 }
 
-export function JobDetail({ job }: JobDetailProps) {
+export function JobDetail({ job, deleting, onDelete }: JobDetailProps) {
   if (!job) {
     return (
       <div className="job-detail empty">
@@ -73,11 +75,28 @@ export function JobDetail({ job }: JobDetailProps) {
 
   return (
     <div className="job-detail">
-      <header>
+      <header className="job-detail-header">
         <h2 className="truncate-text" title={job.filename}>
           {job.filename}
         </h2>
-        <StatusBadge status={job.status} />
+        <div className="job-detail-actions">
+          {onDelete && (
+            <button
+              type="button"
+              className="btn-danger"
+              disabled={job.status === "PROCESSING" || deleting}
+              title={
+                job.status === "PROCESSING"
+                  ? "Impossible de supprimer pendant le traitement"
+                  : "Supprimer ce job"
+              }
+              onClick={() => onDelete(job.jobId)}
+            >
+              {deleting ? "Suppression…" : "Supprimer"}
+            </button>
+          )}
+          <StatusBadge status={job.status} />
+        </div>
       </header>
 
       {job.thumbnailUrl && (

@@ -130,6 +130,27 @@ export async function listJobs(): Promise<VideoJob[]> {
   return data.jobs;
 }
 
+export async function deleteJob(jobId: string): Promise<void> {
+  if (MOCK_MODE) {
+    await delay(200);
+    const job = mockJobs.get(jobId);
+    if (!job) throw new Error("Job not found");
+    if (job.status === "PROCESSING") {
+      throw new Error("Impossible de supprimer un job en cours de traitement");
+    }
+    mockJobs.delete(jobId);
+    mockListeners.delete(jobId);
+    return;
+  }
+  const result = await request<{ message?: string; error?: string; jobId?: string }>(
+    `/jobs/${jobId}`,
+    { method: "DELETE" },
+  );
+  if (result.error) {
+    throw new Error(result.error);
+  }
+}
+
 export async function uploadToS3(
   uploadUrl: string,
   file: File,

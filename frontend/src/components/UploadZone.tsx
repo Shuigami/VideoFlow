@@ -1,19 +1,12 @@
 import { useCallback, useRef, useState } from "react";
 import { confirmUpload, createJob, uploadToS3 } from "../api";
 import type { VideoJob } from "../types";
+import { resolveVideoContentType, VIDEO_FILE_ACCEPT } from "../videoFormats";
 
 interface UploadZoneProps {
   onJobCreated: (job: VideoJob) => void;
   onJobStarted?: (jobId: string) => void;
 }
-
-const ACCEPTED_TYPES = [
-  "video/mp4",
-  "video/webm",
-  "video/quicktime",
-  "video/x-msvideo",
-  "video/x-matroska",
-];
 
 export function UploadZone({ onJobCreated, onJobStarted }: UploadZoneProps) {
   const inputRef = useRef<HTMLInputElement>(null);
@@ -25,7 +18,8 @@ export function UploadZone({ onJobCreated, onJobStarted }: UploadZoneProps) {
 
   const processFile = useCallback(
     async (file: File) => {
-      if (!ACCEPTED_TYPES.includes(file.type)) {
+      const contentType = resolveVideoContentType(file);
+      if (!contentType) {
         setError("Format non supporté. Utilisez MP4, WebM, MOV, AVI ou MKV.");
         return;
       }
@@ -36,9 +30,9 @@ export function UploadZone({ onJobCreated, onJobStarted }: UploadZoneProps) {
       setCurrentFile(file.name);
 
       try {
-        const { jobId, uploadUrl } = await createJob(file.name, file.type);
+        const { jobId, uploadUrl } = await createJob(file.name, contentType);
         onJobStarted?.(jobId);
-        await uploadToS3(uploadUrl, file, setProgress, file.type);
+        await uploadToS3(uploadUrl, file, setProgress, contentType);
         const job = await confirmUpload(jobId);
         onJobCreated(job);
         setCurrentFile(null);
@@ -80,7 +74,7 @@ export function UploadZone({ onJobCreated, onJobStarted }: UploadZoneProps) {
         <input
           ref={inputRef}
           type="file"
-          accept={ACCEPTED_TYPES.join(",")}
+          accept={VIDEO_FILE_ACCEPT}
           hidden
           onChange={(e) => {
             const file = e.target.files?.[0];
@@ -119,7 +113,7 @@ export function UploadZone({ onJobCreated, onJobStarted }: UploadZoneProps) {
               </svg>
             </div>
             <p className="drop-title">Glissez une vidéo ici</p>
-            <p className="drop-subtitle">ou cliquez pour parcourir — MP4, WebM, MOV jusqu'à 500 Mo</p>
+            <p className="drop-subtitle">ou cliquez pour parcourir — MP4, WebM, MOV, AVI, MKV</p>
           </>
         )}
       </div>

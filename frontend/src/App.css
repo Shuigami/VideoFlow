@@ -189,6 +189,35 @@ body {
   color: var(--text);
 }
 
+.btn-ghost:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-danger {
+  background: transparent;
+  border: 1px solid rgba(248, 113, 113, 0.45);
+  color: #f87171;
+  padding: 0.35rem 0.75rem;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  font-family: inherit;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.btn-danger:hover:not(:disabled) {
+  border-color: #f87171;
+  background: rgba(248, 113, 113, 0.12);
+  color: #fca5a5;
+}
+
+.btn-danger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 /* Upload zone */
 .drop-area {
   border: 2px dashed var(--border);
@@ -464,7 +493,7 @@ body {
   font-size: 0.9rem;
 }
 
-.job-detail header {
+.job-detail-header {
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -473,7 +502,14 @@ body {
   min-width: 0;
 }
 
-.job-detail header .status-badge {
+.job-detail-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.job-detail-header .status-badge {
   flex-shrink: 0;
 }
 

@@ -87,7 +87,7 @@ def api_response(status_code: int, body: dict) -> dict:
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
             "Access-Control-Allow-Headers": "Content-Type,Authorization",
-            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+            "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
         },
         "body": json.dumps(body, default=decimal_default),
     }
@@ -204,6 +204,66 @@ def sanitize_sns_subject(text: str, max_length: int = 100) -> str:
     if len(ascii_text) > max_length:
         return ascii_text[: max_length - 3] + "..."
     return ascii_text or "VideoFlow notification"
+
+
+def delete_s3_prefix(bucket: str, prefix: str) -> None:
+    if not bucket:
+        return
+
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        objects = page.get("Contents", [])
+        if not objects:
+            continue
+        s3_client.delete_objects(
+            Bucket=bucket,
+            Delete={"Objects": [{"Key": obj["Key"]} for obj in objects]},
+        )
+
+
+def delete_job_connections(job_id: str) -> None:
+    if not CONNECTIONS_TABLE:
+        return
+
+    table = get_connections_table()
+    response = table.query(
+        IndexName="JobIdIndex",
+        KeyConditionExpression="jobId = :jobId",
+        ExpressionAttributeValues={":jobId": job_id},
+    )
+
+    for item in response.get("Items", []):
+        table.delete_item(Key={"connectionId": item["connectionId"]})
+
+
+def delete_job_assets(job: dict) -> None:
+    job_id = job["jobId"]
+    keys_to_delete: set[tuple[str, str]] = set()
+
+    if UPLOAD_BUCKET and job.get("s3Key"):
+        keys_to_delete.add((UPLOAD_BUCKET, job["s3Key"]))
+    if PROCESSED_BUCKET and job.get("thumbnailKey"):
+        keys_to_delete.add((PROCESSED_BUCKET, job["thumbnailKey"]))
+    if PROCESSED_BUCKET and job.get("outputs"):
+        for key in job["outputs"].values():
+            keys_to_delete.add((PROCESSED_BUCKET, key))
+
+    for bucket, key in keys_to_delete:
+        try:
+            s3_client.delete_object(Bucket=bucket, Key=key)
+        except ClientError as exc:
+            print(f"Failed to delete s3://{bucket}/{key}: {exc}")
+
+    try:
+        delete_s3_prefix(UPLOAD_BUCKET, f"uploads/{job_id}/")
+        delete_s3_prefix(PROCESSED_BUCKET, f"processed/{job_id}/")
+    except ClientError as exc:
+        print(f"Failed to delete S3 prefix for job {job_id}: {exc}")
+
+    try:
+        delete_job_connections(job_id)
+    except ClientError as exc:
+        print(f"Failed to delete WebSocket connections for job {job_id}: {exc}")
 
 
 def publish_sns_notification(job: dict) -> None:

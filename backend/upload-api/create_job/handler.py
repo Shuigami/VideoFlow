@@ -15,6 +15,30 @@ ALLOWED_CONTENT_TYPES = {
     "video/x-matroska",
 }
 
+EXTENSION_TO_CONTENT_TYPE = {
+    "mp4": "video/mp4",
+    "webm": "video/webm",
+    "mov": "video/quicktime",
+    "avi": "video/x-msvideo",
+    "mkv": "video/x-matroska",
+}
+
+
+def resolve_content_type(filename: str, content_type: str) -> str | None:
+    content_type = (content_type or "").strip()
+    if content_type in ALLOWED_CONTENT_TYPES:
+        return content_type
+
+    extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    inferred = EXTENSION_TO_CONTENT_TYPE.get(extension)
+    if not inferred:
+        return None
+
+    if not content_type or content_type == "application/octet-stream":
+        return inferred
+
+    return inferred
+
 
 def lambda_handler(event, context):
     try:
@@ -25,7 +49,8 @@ def lambda_handler(event, context):
         if not filename:
             return api_response(400, {"error": "filename is required"})
 
-        if content_type not in ALLOWED_CONTENT_TYPES:
+        resolved_type = resolve_content_type(filename, content_type)
+        if not resolved_type:
             return api_response(
                 400,
                 {
@@ -35,13 +60,13 @@ def lambda_handler(event, context):
             )
 
         job_id = new_job_id()
-        presigned = generate_presigned_upload_url(job_id, filename, content_type)
+        presigned = generate_presigned_upload_url(job_id, filename, resolved_type)
         timestamp = now_iso()
 
         job = {
             "jobId": job_id,
             "filename": filename,
-            "contentType": content_type,
+            "contentType": resolved_type,
             "status": "PENDING",
             "s3Key": presigned["s3Key"],
             "createdAt": timestamp,

@@ -209,6 +209,33 @@ Resources:
             Path: /jobs/{jobId}/confirm
             Method: POST
 
+  DeleteJobFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub videoflow-delete-job-${Environment}
+      CodeUri: ../backend/upload-api/delete_job/
+      Handler: handler.lambda_handler
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref JobsTable
+        - S3CrudPolicy:
+            BucketName: !Ref UploadBucket
+        - S3CrudPolicy:
+            BucketName: !Ref ProcessedBucket
+        - Statement:
+            - Effect: Allow
+              Action:
+                - dynamodb:Query
+                - dynamodb:DeleteItem
+              Resource: !Sub arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${ConnectionsTable}/index/JobIdIndex
+      Events:
+        DeleteJob:
+          Type: Api
+          Properties:
+            RestApiId: !Ref VideoFlowApi
+            Path: /jobs/{jobId}
+            Method: DELETE
+
   # ── Lambdas Partie 2 — Pipeline ───────────────────────────────────────────
   ProcessVideoFunction:
     Type: AWS::Serverless::Function
@@ -361,7 +388,7 @@ Resources:
       Name: !Sub videoflow-api-${Environment}
       StageName: !Ref Environment
       Cors:
-        AllowMethods: "'GET,POST,OPTIONS'"
+        AllowMethods: "'GET,POST,DELETE,OPTIONS'"
         AllowHeaders: "'Content-Type,Authorization'"
         AllowOrigin: "'*'"
 
